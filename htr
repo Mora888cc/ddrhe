@@ -1,0 +1,1050 @@
+--=====================================================================
+-- neverlose.rbxl.lua — clean build
+-- Every frame: hideAll() -> draw only what is needed.
+-- Menu closed => zero objects on screen. End = unload.
+--=====================================================================
+
+local Players = game:GetService("Players")
+local RS      = game:GetService("RunService")
+local UIS     = game:GetService("UserInputService")
+local WS      = game:GetService("Workspace")
+
+local LP  = Players.LocalPlayer
+local Cam = WS.CurrentCamera
+
+local unpack = table.unpack or unpack
+
+--=====================================================================
+-- CONFIG
+--=====================================================================
+local cfg = {
+    aim = { enabled = true, fov = 150, smooth = 2, part = "Head",
+            teamCheck = true, wallCheck = false, key = Enum.KeyCode.LeftAlt },
+    silent = { enabled = true, fov = 150, part = "Head",
+               visCheck = false, key = Enum.KeyCode.Q },
+    esp = { enabled = true, box = true, name = true, health = true,
+            distance = true, tracer = false, chams = true,
+            color = Color3.fromRGB(255, 62, 62), colorName = "Red",
+            teamCheck = true, maxDist = 1200 },
+    world = { fovCircle = true, crosshair = false, watermark = true },
+    menu  = { key = Enum.KeyCode.RightShift, unloadKey = Enum.KeyCode.End,
+              open = true },
+}
+
+local COLORS = {
+    Red    = Color3.fromRGB(255, 62, 62),
+    Green  = Color3.fromRGB(70, 220, 130),
+    Blue   = Color3.fromRGB(92, 140, 255),
+    Purple = Color3.fromRGB(170, 100, 255),
+    Cyan   = Color3.fromRGB(90, 230, 240),
+    White  = Color3.fromRGB(240, 240, 245),
+}
+
+--=====================================================================
+-- THEME
+--=====================================================================
+local T = {
+    bg     = Color3.fromRGB(10, 10, 12),
+    panel  = Color3.fromRGB(15, 15, 18),
+    panel2 = Color3.fromRGB(24, 24, 29),
+    line   = Color3.fromRGB(36, 36, 42),
+    text   = Color3.fromRGB(228, 228, 234),
+    dim    = Color3.fromRGB(128, 128, 138),
+    accent = Color3.fromRGB(92, 120, 255),
+    on     = Color3.fromRGB(92, 120, 255),
+    off    = Color3.fromRGB(38, 38, 45),
+}
+
+local FONT = (Drawing.Fonts and (Drawing.Fonts.Plex or Drawing.Fonts.UI)) or 0
+
+--=====================================================================
+-- REGISTRY
+--=====================================================================
+local ALL = {}
+
+local function mk(class, props)
+    local ok, o = pcall(function() return Drawing.new(class) end)
+    if not ok or not o then return nil end
+    for k, v in pairs(props or {}) do o[k] = v end
+    ALL[#ALL + 1] = o
+    return o
+end
+
+local function hideAll()
+    for i = 1, #ALL do
+        local o = ALL[i]
+        if o and o.Visible ~= nil then o.Visible = false end
+    end
+end
+
+local function removeAll()
+    for i = 1, #ALL do
+        local o = ALL[i]
+        if o and o.Remove then pcall(o.Remove) end
+    end
+    ALL = {}
+end
+
+local function text(pos, s, size, color, center)
+    return mk("Text", {
+        Text = tostring(s), Size = size or 13, Color = color or T.text,
+        Center = center or false, Outline = true,
+        OutlineColor = Color3.new(0, 0, 0), Font = FONT,
+        Position = pos or Vector2.new(0, 0), Visible = false,
+    })
+end
+
+local function sq(pos, size, color, filled, transparency, thickness)
+    return mk("Square", {
+        Position = pos or Vector2.new(0, 0), Size = size or Vector2.new(1, 1),
+        Color = color or T.line, Filled = filled or false,
+        Transparency = transparency or 0, Thickness = thickness or 1,
+        Visible = false,
+    })
+end
+
+local function circle(pos, radius, color, filled)
+    return mk("Circle", {
+        Position = pos or Vector2.new(0, 0), Radius = radius or 4,
+        Color = color or T.text, Filled = filled or true,
+        Thickness = 1, NumSides = 24, Visible = false,
+    })
+end
+
+local function line2(a, b, color)
+    return mk("Line", {
+        From = a or Vector2.new(0, 0), To = b or Vector2.new(0, 0),
+        Color = color or T.text, Thickness = 1, Visible = false,
+    })
+end
+
+local function round(color, alpha)
+    return {
+        sq  = sq(nil, nil, color, true, alpha or 0),
+        sq2 = sq(nil, nil, color, true, alpha or 0),
+        c1  = circle(nil, 4, color, true),
+        c2  = circle(nil, 4, color, true),
+    }
+end
+
+local function showRound(r, x, y, w, h, radius)
+    radius = math.min(radius or 6, h / 2, w / 2)
+    r.sq.Visible = true
+    r.sq.Position = Vector2.new(x + radius, y)
+    r.sq.Size = Vector2.new(math.max(0, w - radius * 2), h)
+
+    r.sq2.Visible = true
+    r.sq2.Position = Vector2.new(x, y + radius)
+    r.sq2.Size = Vector2.new(radius, math.max(0, h - radius * 2))
+
+    r.c1.Visible = true
+    r.c1.Position = Vector2.new(x + radius, y + radius)
+    r.c1.Radius = radius
+
+    r.c2.Visible = true
+    r.c2.Position = Vector2.new(x + w - radius, y + radius)
+    r.c2.Radius = radius
+end
+
+local function tint(r, c)
+    r.sq.Color = c
+    r.sq2.Color = c
+    r.c1.Color = c
+    r.c2.Color = c
+end
+
+--=====================================================================
+-- ENTITY
+--=====================================================================
+local function w2s(pos)
+    local sp, on = Cam:WorldToViewportPoint(pos)
+    return Vector2.new(sp.X, sp.Y), on and sp.Z > 0
+end
+
+local function viewport()
+    return Cam.ViewportSize
+end
+
+local function charOf(plr)
+    local c = plr.Character
+    if not c then return end
+    local hum = c:FindFirstChildOfClass("Humanoid")
+    local hrp = c:FindFirstChild("HumanoidRootPart")
+    local head = c:FindFirstChild("Head")
+    if not (hum and hrp and head) or hum.Health <= 0 then return end
+    return c, hum, hrp, head
+end
+
+local function isEnemy(plr)
+    if plr == LP then return false end
+    if cfg.esp.teamCheck and LP.Team and plr.Team and plr.Team == LP.Team then
+        return false
+    end
+    return true
+end
+
+local function pickPart(c, name)
+    if name == "Nearest" then return c:FindFirstChild("HumanoidRootPart") end
+    return c:FindFirstChild(name) or c:FindFirstChild("Head")
+end
+
+local function hasLOS(part)
+    local origin = Cam.CFrame.Position
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { LP.Character, Cam }
+    local res = WS:Raycast(origin, part.Position - origin, params)
+    return res == nil or res.Instance:IsDescendantOf(part.Parent)
+end
+
+local AimPart = nil
+
+local function findTarget(fovDeg, partName, wallCheck, teamCheck)
+    local center = viewport() / 2
+    local best, bestD = nil, fovDeg
+    local myTeam = LP.Team
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        local skip = false
+        if plr == LP then skip = true end
+        if teamCheck and myTeam and plr.Team and plr.Team == myTeam then skip = true end
+
+        if not skip then
+            local c = charOf(plr)
+            if c then
+                local part = pickPart(c, partName)
+                if part then
+                    local sp, on = w2s(part.Position)
+                    if on then
+                        local d = (sp - center).Magnitude
+                        if d < bestD and (not wallCheck or hasLOS(part)) then
+                            bestD, best = d, part
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+--=====================================================================
+-- CHAMS
+--=====================================================================
+local HL = {}
+
+local function syncChams()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        local c = charOf(plr)
+        local want = cfg.esp.enabled and cfg.esp.chams and c and isEnemy(plr)
+
+        if not want then
+            if HL[plr] then HL[plr]:Destroy() HL[plr] = nil end
+        else
+            local h = HL[plr]
+            if not h or h.Parent ~= c then
+                if h then h:Destroy() end
+                h = Instance.new("Highlight")
+                h.Name = "nl_chams"
+                h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                h.Adornee = c
+                h.Parent = c
+                HL[plr] = h
+            end
+            h.FillColor = cfg.esp.color
+            h.OutlineColor = cfg.esp.color:Lerp(Color3.new(1, 1, 1), 0.35)
+            h.FillTransparency = 0.55
+            h.OutlineTransparency = 0
+        end
+    end
+end
+
+--=====================================================================
+-- SILENT AIM
+--=====================================================================
+local silentHooked = false
+
+local function installSilent()
+    if silentHooked then return end
+    if not (getrawmetatable and hookmetamethod and newcclosure and getnamecallmethod) then
+        return
+    end
+
+    local mt = getrawmetatable(game)
+    local old = mt.__namecall
+    if not old then return end
+    pcall(setreadonly, mt, false)
+
+    mt.__namecall = newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+
+        if cfg.silent.enabled and AimPart
+           and (method == "Raycast" or method == "FindPartOnRay"
+             or method == "FindPartOnRayWithIgnoreList"
+             or method == "FindPartOnRayWithWhitelist") then
+
+            local args = { ... }
+            local target = AimPart.Position
+
+            if method == "Raycast" then
+                local o, d = args[1], args[2]
+                if typeof(o) == "Vector3" and typeof(d) == "Vector3" then
+                    local diff = target - o
+                    if diff.Magnitude > 0 then
+                        args[2] = diff.Unit * d.Magnitude
+                        return old(self, args[1], args[2], args[3])
+                    end
+                end
+            else
+                local ray = args[1]
+                if typeof(ray) == "Ray" then
+                    local diff = target - ray.Origin
+                    if diff.Magnitude > 0 then
+                        args[1] = Ray.new(ray.Origin, diff.Unit * ray.Direction.Magnitude)
+                    end
+                end
+            end
+
+            return old(self, unpack(args))
+        end
+
+        return old(self, ...)
+    end)
+
+    pcall(setreadonly, mt, true)
+    silentHooked = true
+end
+
+--=====================================================================
+-- UI STATE
+--=====================================================================
+local UI = {
+    x = 120, y = 90, w = 660, h = 452,
+    side = 156, head = 48,
+    page = 1, drag = false, dragOff = Vector2.new(0, 0),
+    slider = nil, bind = nil, pages = {},
+}
+
+local Hit = {}
+
+local function hit(x, y, w, h, fn)
+    Hit[#Hit + 1] = { x = x, y = y, w = w, h = h, fn = fn }
+end
+
+local CH = {
+    bg     = round(T.bg, 0),
+    border = sq(nil, nil, T.line, false, 0, 1),
+    brand  = text(nil, "neverlose", 18, T.text),
+    tag    = text(nil, "rbx", 11, T.dim),
+    acc    = circle(nil, 3, T.accent, true),
+    sep    = sq(nil, nil, T.line, true),
+    sideBg = sq(nil, nil, T.panel, true),
+    sideLn = sq(nil, nil, T.line, true),
+    foot   = text(nil, "rs - menu    end - unload", 11, T.dim),
+}
+
+local PageDefs = {
+    { group = "AIMBOT",  name = "Ragebot" },
+    { group = "AIMBOT",  name = "Silent"  },
+    { group = "VISUALS", name = "Players" },
+    { group = "VISUALS", name = "World"   },
+    { group = "MISC",    name = "Main"    },
+}
+
+local Side = {}
+for i, d in ipairs(PageDefs) do
+    Side[i] = {
+        def = d, y = 0,
+        bg  = round(T.accent, 0.9),
+        bar = sq(nil, nil, T.accent, true),
+        tx  = text(nil, d.name, 13, T.dim),
+        grp = text(nil, d.group, 10, Color3.fromRGB(78, 78, 88)),
+    }
+end
+
+--=====================================================================
+-- WIDGETS
+--=====================================================================
+local function page(p)
+    UI.pages[p] = UI.pages[p] or { left = {}, right = {} }
+    return UI.pages[p]
+end
+
+local function add(p, col, w)
+    local pg = page(p)
+    if col == "right" then
+        pg.right[#pg.right + 1] = w
+    else
+        pg.left[#pg.left + 1] = w
+    end
+end
+
+local function section(p, title, col)
+    add(p, col, { kind = "section", title = title, tx = text(nil, title, 13, T.text) })
+end
+
+local function toggle(p, title, t, k, col)
+    add(p, col, {
+        kind = "toggle", title = title, t = t, k = k,
+        tx = text(nil, title, 13, T.text),
+        tr = round(T.off, 0),
+        kn = circle(nil, 6, T.text, true),
+    })
+end
+
+local function slider(p, title, t, k, mn, mx, suffix, col)
+    add(p, col, {
+        kind = "slider", title = title, t = t, k = k,
+        min = mn, max = mx, suffix = suffix or "",
+        tx = text(nil, title, 13, T.text),
+        val = text(nil, "", 12, T.dim),
+        tr = sq(nil, nil, T.off, true),
+        fl = sq(nil, nil, T.on, true),
+        kn = circle(nil, 5, T.text, true),
+    })
+end
+
+local function dropdown(p, title, t, k, items, col)
+    local w = {
+        kind = "dropdown", title = title, t = t, k = k,
+        items = items, open = false,
+        tx = text(nil, title, 13, T.text),
+        bx = round(T.off, 0),
+        cur = text(nil, "", 12, T.text),
+        arw = text(nil, "v", 10, T.dim),
+        opts = {},
+    }
+    for i, name in ipairs(items) do
+        w.opts[i] = { bg = sq(nil, nil, T.panel2, true), tx = text(nil, name, 12, T.text) }
+    end
+    add(p, col, w)
+end
+
+local function keybind(p, title, t, k, col)
+    add(p, col, {
+        kind = "keybind", title = title, t = t, k = k,
+        tx = text(nil, title, 13, T.text),
+        bx = round(T.off, 0),
+        cur = text(nil, "", 12, T.text, true),
+    })
+end
+
+local function setVal(t, k, v)
+    t[k] = v
+    if k == "colorName" then
+        cfg.esp.color = COLORS[v] or cfg.esp.color
+    end
+end
+
+--=====================================================================
+-- PAGE CONTENT
+--=====================================================================
+section(1, "Ragebot")
+toggle(1, "Enable Aimbot", cfg.aim, "enabled")
+slider(1, "FOV", cfg.aim, "fov", 10, 360, "deg")
+slider(1, "Smooth", cfg.aim, "smooth", 1, 20, "x")
+dropdown(1, "Hitbox", cfg.aim, "part", { "Head", "Torso", "Nearest" })
+toggle(1, "Team Check", cfg.aim, "teamCheck")
+toggle(1, "Wall Check", cfg.aim, "wallCheck")
+
+section(1, "Keys", "right")
+keybind(1, "Aim Key", cfg.aim, "key", "right")
+keybind(1, "Menu Key", cfg.menu, "key", "right")
+keybind(1, "Unload Key", cfg.menu, "unloadKey", "right")
+
+section(2, "Silent Aim")
+toggle(2, "Enable Silent", cfg.silent, "enabled")
+toggle(2, "Visibility Check", cfg.silent, "visCheck")
+slider(2, "Silent FOV", cfg.silent, "fov", 10, 360, "deg")
+dropdown(2, "Hitbox", cfg.silent, "part", { "Head", "Torso" }, "right")
+keybind(2, "Silent Key", cfg.silent, "key", "right")
+
+section(3, "Players")
+toggle(3, "Enable ESP", cfg.esp, "enabled")
+toggle(3, "Box", cfg.esp, "box")
+toggle(3, "Name", cfg.esp, "name")
+toggle(3, "Health", cfg.esp, "health")
+toggle(3, "Distance", cfg.esp, "distance")
+toggle(3, "Tracer", cfg.esp, "tracer")
+toggle(3, "Chams", cfg.esp, "chams")
+toggle(3, "Team Check", cfg.esp, "teamCheck")
+slider(3, "Max Distance", cfg.esp, "maxDist", 100, 3000, "u")
+dropdown(3, "ESP Color", cfg.esp, "colorName",
+         { "Red", "Green", "Blue", "Purple", "Cyan", "White" }, "right")
+
+section(4, "World")
+toggle(4, "FOV Circle", cfg.world, "fovCircle")
+toggle(4, "Crosshair", cfg.world, "crosshair")
+toggle(4, "Watermark", cfg.world, "watermark")
+
+section(5, "Main")
+toggle(5, "Watermark", cfg.world, "watermark")
+section(5, "Build", "right")
+
+--=====================================================================
+-- LAYOUT
+--=====================================================================
+local COLW = 224
+
+local function colX(col)
+    local base = UI.x + UI.side + 22
+    if col == "right" then return base + 238 end
+    return base
+end
+
+local openDropdowns = {}
+
+local function drawWidget(w, x, y)
+    if w.kind == "section" then
+        w.tx.Visible = true
+        w.tx.Position = Vector2.new(x, y)
+        w.tx.Color = T.text
+        return y + 28
+    end
+
+    if w.kind == "toggle" then
+        w.tx.Visible = true
+        w.tx.Position = Vector2.new(x, y + 1)
+        w.tx.Color = T.text
+
+        local on = w.t and w.t[w.k] and true or false
+        local tx, ty = x + COLW - 40, y + 1
+
+        showRound(w.tr, tx, ty, 36, 18, 9)
+        tint(w.tr, on and T.on or T.off)
+
+        w.kn.Visible = true
+        w.kn.Position = Vector2.new(tx + (on and 27 or 9), ty + 9)
+
+        hit(tx - 4, ty, 44, 18, function()
+            if w.t then w.t[w.k] = not w.t[w.k] end
+        end)
+        return y + 26
+    end
+
+    if w.kind == "slider" then
+        w.tx.Visible = true
+        w.tx.Position = Vector2.new(x, y)
+        w.tx.Color = T.text
+
+        local v = (w.t and w.t[w.k]) or w.min
+        w.val.Visible = true
+        w.val.Position = Vector2.new(x + COLW - 56, y)
+        w.val.Color = T.dim
+        w.val.Text = tostring(math.floor(v)) .. w.suffix
+
+        local tx, ty = x, y + 20
+        local tw = COLW - 20
+
+        w.tr.Visible = true
+        w.tr.Position = Vector2.new(tx, ty)
+        w.tr.Size = Vector2.new(tw, 3)
+        w.tr.Color = T.off
+
+        local pct = math.clamp((v - w.min) / (w.max - w.min), 0, 1)
+
+        w.fl.Visible = true
+        w.fl.Position = Vector2.new(tx, ty)
+        w.fl.Size = Vector2.new(math.max(1, tw * pct), 3)
+        w.fl.Color = T.on
+
+        w.kn.Visible = true
+        w.kn.Position = Vector2.new(tx + tw * pct, ty + 1)
+
+        w._track = { x = tx, y = ty, w = tw }
+
+        local track = w._track
+        hit(tx, ty - 7, tw, 17, function(mx)
+            local p = math.clamp((mx - track.x) / track.w, 0, 1)
+            setVal(w.t, w.k, math.floor(w.min + (w.max - w.min) * p))
+            UI.slider = w
+        end)
+        return y + 42
+    end
+
+    if w.kind == "dropdown" then
+        w.tx.Visible = true
+        w.tx.Position = Vector2.new(x, y)
+        w.tx.Color = T.text
+
+        local bx, by = x, y + 20
+        local bw = COLW - 10
+
+        showRound(w.bx, bx, by, bw, 20, 4)
+        tint(w.bx, T.off)
+
+        w.cur.Visible = true
+        w.cur.Position = Vector2.new(bx + 8, by + 4)
+        w.cur.Color = T.text
+        w.cur.Text = tostring((w.t and w.t[w.k]) or "-")
+
+        w.arw.Visible = true
+        w.arw.Position = Vector2.new(bx + bw - 14, by + 5)
+
+        w._box = { x = bx, y = by, w = bw, h = 20 }
+
+        hit(bx, by, bw, 20, function()
+            w.open = not w.open
+        end)
+
+        return y + 50
+    end
+
+    if w.kind == "keybind" then
+        w.tx.Visible = true
+        w.tx.Position = Vector2.new(x, y + 1)
+        w.tx.Color = T.text
+
+        local bx, by = x + COLW - 84, y
+        showRound(w.bx, bx, by, 84, 18, 4)
+        tint(w.bx, T.off)
+
+        w.cur.Visible = true
+        w.cur.Position = Vector2.new(bx + 42, by + 2)
+        w.cur.Color = (UI.bind == w) and T.accent or T.text
+        w.cur.Text = (UI.bind == w) and "..." or tostring((w.t and w.t[w.k]) or "-")
+
+        w._box = { x = bx, y = by, w = 84, h = 18 }
+
+        hit(bx, by, 84, 18, function()
+            UI.bind = w
+        end)
+        return y + 26
+    end
+
+    return y + 24
+end
+
+local function drawDropdownList(w, x, y)
+    if not w.open then return end
+    local bx = x
+    local by = y + 70
+    local bw = COLW - 10
+
+    for i, opt in ipairs(w.opts) do
+        local oy = by + (i - 1) * 18
+        opt.bg.Visible = true
+        opt.bg.Position = Vector2.new(bx, oy)
+        opt.bg.Size = Vector2.new(bw, 18)
+        opt.bg.Color = (tostring((w.t and w.t[w.k]) or "") == w.items[i]) and T.panel2 or T.bg
+
+        opt.tx.Visible = true
+        opt.tx.Position = Vector2.new(bx + 8, oy + 2)
+        opt.tx.Color = T.text
+
+        hit(bx, oy, bw, 18, function()
+            setVal(w.t, w.k, w.items[i])
+            w.open = false
+        end)
+    end
+end
+
+local function drawChrome()
+    local x, y, w, h = UI.x, UI.y, UI.w, UI.h
+
+    showRound(CH.bg, x, y, w, h, 10)
+
+    CH.border.Visible = true
+    CH.border.Position = Vector2.new(x, y)
+    CH.border.Size = Vector2.new(w, h)
+    CH.border.Color = T.line
+
+    CH.brand.Visible = true
+    CH.brand.Position = Vector2.new(x + 18, y + 14)
+
+    CH.tag.Visible = true
+    CH.tag.Position = Vector2.new(x + 18 + 96, y + 20)
+
+    CH.acc.Visible = true
+    CH.acc.Position = Vector2.new(x + 18 + 86, y + 23)
+
+    CH.sep.Visible = true
+    CH.sep.Position = Vector2.new(x, y + UI.head)
+    CH.sep.Size = Vector2.new(w, 1)
+
+    CH.sideBg.Visible = true
+    CH.sideBg.Position = Vector2.new(x, y + UI.head)
+    CH.sideBg.Size = Vector2.new(UI.side, h - UI.head)
+
+    CH.sideLn.Visible = true
+    CH.sideLn.Position = Vector2.new(x + UI.side, y + UI.head)
+    CH.sideLn.Size = Vector2.new(1, h - UI.head)
+
+    CH.foot.Visible = true
+    CH.foot.Position = Vector2.new(x + UI.side + 22, y + h - 22)
+
+    local sy = y + UI.head + 18
+    local last = nil
+
+    for i, it in ipairs(Side) do
+        if it.def.group ~= last then
+            it.grp.Visible = true
+            it.grp.Position = Vector2.new(x + 18, sy)
+            it.grp.Text = it.def.group
+            sy = sy + 20
+            last = it.def.group
+        end
+
+        local active = (UI.page == i)
+        it.y = sy
+
+        if active then
+            showRound(it.bg, x + 8, sy - 3, UI.side - 16, 26, 4)
+        end
+
+        it.bar.Visible = active
+        it.bar.Position = Vector2.new(x + 8, sy + 1)
+        it.bar.Size = Vector2.new(2, 18)
+        it.bar.Color = T.accent
+
+        it.tx.Visible = true
+        it.tx.Position = Vector2.new(x + 26, sy)
+        it.tx.Color = active and T.text or T.dim
+
+        do
+            local iy = sy
+            hit(x + 8, iy - 3, UI.side - 16, 26, function()
+                UI.page = i
+            end)
+        end
+
+        sy = sy + 30
+    end
+
+    hit(x, y, w, UI.head, function(mx, my)
+        UI.drag = true
+        UI.dragOff = Vector2.new(mx - UI.x, my - UI.y)
+    end)
+end
+
+local function drawUI()
+    Hit = {}
+    openDropdowns = {}
+
+    if not cfg.menu.open then return end
+
+    drawChrome()
+
+    local pg = UI.pages[UI.page]
+    if not pg then return end
+
+    local lx, ly = colX("left"), UI.y + UI.head + 18
+    local rx, ry = colX("right"), UI.y + UI.head + 18
+
+    for _, w in ipairs(pg.left) do
+        ly = drawWidget(w, lx, ly)
+        if w.kind == "dropdown" and w.open then
+            openDropdowns[#openDropdowns + 1] = { w = w, x = lx, y = ly - 50 }
+        end
+    end
+
+    for _, w in ipairs(pg.right) do
+        ry = drawWidget(w, rx, ry)
+        if w.kind == "dropdown" and w.open then
+            openDropdowns[#openDropdowns + 1] = { w = w, x = rx, y = ry - 50 }
+        end
+    end
+
+    for _, d in ipairs(openDropdowns) do
+        drawDropdownList(d.w, d.x, d.y)
+    end
+end
+
+--=====================================================================
+-- ESP
+--=====================================================================
+local ESP = {}
+
+local function updateESP()
+    for plr, objs in pairs(ESP) do
+        if not plr.Parent then
+            for _, o in pairs(objs) do
+                if o and o.Remove then pcall(o.Remove) end
+            end
+            ESP[plr] = nil
+        end
+    end
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP then
+            local e = ESP[plr]
+            if not e then
+                e = {
+                    box  = sq(nil, nil, T.text, false, 0, 1),
+                    boxF = sq(nil, nil, T.text, true, 0.88),
+                    hpB  = sq(nil, nil, Color3.fromRGB(12, 12, 12), true),
+                    hpF  = sq(nil, nil, T.text, true),
+                    name = text(nil, "", 13, T.text, true),
+                    dist = text(nil, "", 11, T.dim, true),
+                    tr   = line2(nil, nil, T.text),
+                }
+                ESP[plr] = e
+            end
+
+            local c, hum, hrp, head = charOf(plr)
+            if cfg.esp.enabled and c and isEnemy(plr) then
+                local root = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                local from = root and root.Position or Cam.CFrame.Position
+                local d = (hrp.Position - from).Magnitude
+
+                if d <= cfg.esp.maxDist then
+                    local st, vt = w2s(head.Position + Vector3.new(0, 0.6, 0))
+                    local sb, vb = w2s(hrp.Position - Vector3.new(0, 2.9, 0))
+
+                    if vt and vb then
+                        local col = cfg.esp.color
+                        local h = math.abs(sb.Y - st.Y)
+                        local w = h * 0.52
+                        local x = st.X - w / 2
+
+                        e.box.Visible = cfg.esp.box
+                        e.box.Color = col
+                        e.box.Thickness = 1
+                        e.box.Position = Vector2.new(x, st.Y)
+                        e.box.Size = Vector2.new(w, h)
+
+                        e.boxF.Visible = cfg.esp.box
+                        e.boxF.Color = col
+                        e.boxF.Transparency = 0.88
+                        e.boxF.Position = Vector2.new(x, st.Y)
+                        e.boxF.Size = Vector2.new(w, h)
+
+                        local hp = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+                        e.hpB.Visible = cfg.esp.health
+                        e.hpB.Position = Vector2.new(x - 5, st.Y)
+                        e.hpB.Size = Vector2.new(2, h)
+
+                        e.hpF.Visible = cfg.esp.health
+                        e.hpF.Color = Color3.fromRGB(255 * (1 - hp), 255 * hp, 0)
+                        e.hpF.Position = Vector2.new(x - 5, sb.Y - h * hp)
+                        e.hpF.Size = Vector2.new(2, h * hp)
+
+                        e.name.Visible = cfg.esp.name
+                        e.name.Text = plr.Name
+                        e.name.Color = col
+                        e.name.Position = Vector2.new(st.X, st.Y - 16)
+
+                        e.dist.Visible = cfg.esp.distance
+                        e.dist.Text = string.format("%d m", math.floor(d / 3))
+                        e.dist.Position = Vector2.new(st.X, sb.Y + 3)
+
+                        e.tr.Visible = cfg.esp.tracer
+                        e.tr.Color = col
+                        e.tr.From = Vector2.new(viewport().X / 2, viewport().Y)
+                        e.tr.To = Vector2.new(st.X, sb.Y)
+                    end
+                end
+            end
+        end
+    end
+end
+
+--=====================================================================
+-- WORLD
+--=====================================================================
+local fovCircle = circle(nil, 40, T.dim, false)
+fovCircle.Thickness = 1
+local crossV = line2(nil, nil, T.text)
+local crossH = line2(nil, nil, T.text)
+local wmBrand = text(nil, "neverlose", 14, T.accent)
+local wmBody  = text(nil, "", 12, T.text)
+local lockTx  = text(nil, "LOCK", 12, Color3.fromRGB(70, 220, 130), true)
+
+local function updateWorld()
+    local vp = viewport()
+    local center = vp / 2
+
+    fovCircle.Visible = cfg.world.fovCircle
+    fovCircle.Position = center
+    fovCircle.Radius = math.max(8, cfg.silent.fov * (vp.X / 1920))
+    fovCircle.Color = AimPart and Color3.fromRGB(70, 220, 130) or T.dim
+
+    crossV.Visible = cfg.world.crosshair
+    crossH.Visible = cfg.world.crosshair
+    crossV.From = Vector2.new(center.X, center.Y - 6)
+    crossV.To = Vector2.new(center.X, center.Y + 6)
+    crossH.From = Vector2.new(center.X - 6, center.Y)
+    crossH.To = Vector2.new(center.X + 6, center.Y)
+
+    if cfg.world.watermark then
+        local parts = {}
+        if cfg.aim.enabled then parts[#parts + 1] = "AIM" end
+        if cfg.silent.enabled then parts[#parts + 1] = "SILENT" end
+        if cfg.esp.enabled then parts[#parts + 1] = "ESP" end
+        if cfg.esp.chams then parts[#parts + 1] = "CHAMS" end
+
+        wmBrand.Visible = true
+        wmBrand.Position = Vector2.new(vp.X - 300, 12)
+
+        wmBody.Visible = true
+        wmBody.Text = "| " .. table.concat(parts, "  ")
+        wmBody.Position = Vector2.new(vp.X - 300 + 68, 13)
+    end
+
+    if AimPart then
+        local sp, on = w2s(AimPart.Position)
+        if on then
+            lockTx.Visible = true
+            lockTx.Position = Vector2.new(sp.X, sp.Y - 22)
+        end
+    end
+end
+
+--=====================================================================
+-- AIM
+--=====================================================================
+local function updateAim()
+    AimPart = nil
+
+    if cfg.silent.enabled then
+        AimPart = findTarget(cfg.silent.fov, cfg.silent.part,
+                             cfg.silent.visCheck, cfg.esp.teamCheck)
+    end
+
+    if cfg.aim.enabled and UIS:IsKeyDown(cfg.aim.key) then
+        local t = findTarget(cfg.aim.fov, cfg.aim.part,
+                             cfg.aim.wallCheck, cfg.aim.teamCheck)
+        if t then
+            AimPart = AimPart or t
+            local goal = CFrame.new(Cam.CFrame.Position, t.Position)
+            Cam.CFrame = Cam.CFrame:Lerp(goal, 1 / math.max(1, cfg.aim.smooth))
+        end
+    end
+end
+
+--=====================================================================
+-- INPUT
+--=====================================================================
+local function inRect(m, x, y, w, h)
+    return m.X >= x and m.X <= x + w and m.Y >= y and m.Y <= y + h
+end
+
+local function unload()
+    for _, h in pairs(HL) do
+        if h then pcall(function() h:Destroy() end) end
+    end
+    HL = {}
+
+    for _, objs in pairs(ESP) do
+        for _, o in pairs(objs) do
+            if o and o.Remove then pcall(o.Remove) end
+        end
+    end
+    ESP = {}
+
+    removeAll()
+
+    if getgenv then
+        pcall(function() getgenv().nl_loaded = false end)
+    end
+end
+
+local conns = {}
+
+local function bind(ev, fn)
+    conns[#conns + 1] = ev:Connect(fn)
+end
+
+bind(UIS.InputBegan, function(input, gp)
+    if UI.bind and input.KeyCode ~= Enum.KeyCode.Unknown then
+        if input.KeyCode == Enum.KeyCode.Escape then
+            UI.bind = nil
+        else
+            local w = UI.bind
+            if w.t then w.t[w.k] = input.KeyCode end
+            UI.bind = nil
+        end
+        return
+    end
+
+    if input.KeyCode == cfg.menu.key then
+        cfg.menu.open = not cfg.menu.open
+        if not cfg.menu.open then
+            UI.slider = nil
+            for _, pg in pairs(UI.pages) do
+                for _, list in ipairs({ pg.left, pg.right }) do
+                    for _, w in ipairs(list) do
+                        if w.kind == "dropdown" then w.open = false end
+                    end
+                end
+            end
+        end
+        return
+    end
+
+    if input.KeyCode == cfg.menu.unloadKey then
+        unload()
+        return
+    end
+
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+    if not cfg.menu.open then return end
+
+    local m = UIS:GetMouseLocation()
+
+    for i = #Hit, 1, -1 do
+        local h = Hit[i]
+        if inRect(m, h.x, h.y, h.w, h.h) then
+            if h.fn then pcall(h.fn, m.X, m.Y) end
+            return
+        end
+    end
+
+    for _, pg in pairs(UI.pages) do
+        for _, list in ipairs({ pg.left, pg.right }) do
+            for _, w in ipairs(list) do
+                if w.kind == "dropdown" and w.open then
+                    if not (w._box and inRect(m, w._box.x, w._box.y, w._box.w, w._box.h + 200)) then
+                        w.open = false
+                    end
+                end
+            end
+        end
+    end
+end)
+
+bind(UIS.InputChanged, function(input)
+    if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+    local m = UIS:GetMouseLocation()
+
+    if UI.drag then
+        UI.x = m.X - UI.dragOff.X
+        UI.y = m.Y - UI.dragOff.Y
+    end
+
+    if UI.slider and UI.slider._track then
+        local w = UI.slider
+        local tr = w._track
+        local p = math.clamp((m.X - tr.x) / tr.w, 0, 1)
+        setVal(w.t, w.k, math.floor(w.min + (w.max - w.min) * p))
+    end
+end)
+
+bind(UIS.InputEnded, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        UI.drag = false
+        UI.slider = nil
+    end
+end)
+
+bind(WS:GetPropertyChangedSignal("CurrentCamera"), function()
+    if WS.CurrentCamera then Cam = WS.CurrentCamera end
+end)
+
+--=====================================================================
+-- LOOP
+--=====================================================================
+installSilent()
+
+RS.RenderStepped:Connect(function()
+    if WS.CurrentCamera ~= Cam then Cam = WS.CurrentCamera end
+
+    hideAll()
+    pcall(updateAim)
+    pcall(updateESP)
+    pcall(syncChams)
+    pcall(updateWorld)
+    pcall(drawUI)
+end)
+
+if getgenv then pcall(function() getgenv().nl_loaded = true end) end
